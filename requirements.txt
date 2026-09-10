@@ -1,0 +1,6 @@
+aiogram>=3.0,<4
+claude-agent-sdk>=0.2.150,<0.3
+openpyxl>=3.1,<4
+python-dotenv>=1.0,<2
+tzdata>=2025.2
+xlrd>=2.0,<3
