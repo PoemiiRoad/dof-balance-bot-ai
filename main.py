@@ -528,21 +528,24 @@ def db_save_daily(
     отклоняются, а текущая дата не попадает в суточный баланс.
     """
     now_local = local_now()
-calendar_today = today or now_local.date()
+    calendar_today = today or now_local.date()
 
-# Производственные сутки начинаются в 19:30.
-# После 19:30 ночная Смена 1 уже относится к следующей дате отчёта.
-if today is None and (now_local.hour, now_local.minute) >= (19, 30):
-    production_today = calendar_today + timedelta(days=1)
-else:
-    production_today = calendar_today
+    # Производственные сутки начинаются в 19:30.
+    # После 19:30 ночная Смена 1 уже относится к следующей дате отчёта.
+    if today is None and (now_local.hour, now_local.minute) >= (19, 30):
+        production_today = calendar_today + timedelta(days=1)
+    else:
+        production_today = calendar_today
+
     by_day = parsed.get("daily_by_shift", {})
 
     valid_days: list[tuple[int, date]] = []
     measured_days: list[tuple[int, date]] = []
     all_valid_by_day: dict[int, dict] = {}
+
     for raw_day, shifts in by_day.items():
         has_measurements = _day_has_measurements(shifts)
+
         try:
             day_num = int(raw_day)
             report_day = date(year, month, day_num)
@@ -553,15 +556,18 @@ else:
             raise ReportDataError(
                 f"Некорректная дата в отчёте: {raw_day}.{month:02d}.{year}"
             ) from exc
+
         if report_day > production_today:
-    if not has_measurements:
-        continue
-    raise ReportDataError(
-        f"В отчёте найдены ненулевые данные за будущую производственную дату "
-        f"{report_day:%d.%m.%Y}. Проверьте период файла."
-    )
+            if not has_measurements:
+                continue
+            raise ReportDataError(
+                f"В отчёте найдены ненулевые данные за будущую производственную дату "
+                f"{report_day:%d.%m.%Y}. Проверьте период файла."
+            )
+
         all_valid_by_day[day_num] = shifts
         valid_days.append((day_num, report_day))
+
         if has_measurements:
             measured_days.append((day_num, report_day))
 
@@ -573,33 +579,36 @@ else:
     # Все прошедшие нулевые сутки сохраняются как возможная остановка.
     # Пустые колонки текущего и будущих дней не считаются фактическими данными.
     data_days = [
-    (day_num, report_day)
-    for day_num, report_day in valid_days
-    if report_day < production_today
-    or _day_has_measurements(all_valid_by_day[day_num])
-]
+        (day_num, report_day)
+        for day_num, report_day in valid_days
+        if report_day < production_today
+        or _day_has_measurements(all_valid_by_day[day_num])
+    ]
     data_days.sort()
-    by_day = {day_num: all_valid_by_day[day_num] for day_num, _report_day in data_days}
+
+    by_day = {
+        day_num: all_valid_by_day[day_num]
+        for day_num, _report_day in data_days
+    }
     max_day = data_days[-1][0]
 
-    # Текущий незавершённый день в обычном случае совпадает с календарной
-    # датой сервера. Но свежая выгрузка после ночной смены может заканчиваться
-    # предыдущей датой: в ней уже есть Смена 1, а Смена 2 ещё отсутствует.
-    # Поэтому резервно определяем незавершённый день по последней дате с
-    # фактическими показаниями, а не только по совпадению с ``today``.
+    # Текущий незавершённый производственный день.
     incomplete_day = next(
-    (
-        day_num
-        for day_num, report_day in data_days
-        if report_day == production_today
-    ),
-    None,
-)
+        (
+            day_num
+            for day_num, report_day in data_days
+            if report_day == production_today
+        ),
+        None,
+    )
+
+    # Резервный вариант: последняя дата имеет только Смену 1.
     if incomplete_day is None and measured_days:
         last_measured_day, _last_measured_date = max(
             measured_days, key=lambda item: item[1]
         )
         last_shifts = all_valid_by_day[last_measured_day]
+
         if (
             _shift_has_measurements(last_shifts.get(1, {}))
             and not _shift_has_measurements(last_shifts.get(2, {}))
@@ -607,10 +616,10 @@ else:
             incomplete_day = last_measured_day
 
     completed_days = [
-    day_num
-    for day_num, report_day in data_days
-    if report_day < production_today and day_num != incomplete_day
-]
+        day_num
+        for day_num, report_day in data_days
+        if report_day < production_today and day_num != incomplete_day
+    ]
 
     base_fields = ["year", "month", "day_num", "report_date", "source"] + FIELDS
     cols = ",".join(base_fields)
