@@ -54,7 +54,7 @@ load_dotenv(BASE_DIR / ".env")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD_VERSION = "2026.09.10-claude-pro-v1"
+BUILD_VERSION = "2026.09.14-railway-datefix-test"
 
 # ════════════════════════════════════════════════════════
 #  НАСТРОЙКИ
