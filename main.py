@@ -558,12 +558,30 @@ def db_save_daily(
             ) from exc
 
         if report_day > production_today:
-            if not has_measurements:
-                continue
-            raise ReportDataError(
-                f"В отчёте найдены ненулевые данные за будущую производственную дату "
-                f"{report_day:%d.%m.%Y}. Проверьте период файла."
-            )
+    if not has_measurements:
+        continue
+
+    future_values = []
+
+    for shift_num in (1, 2):
+        shift_data = shifts.get(shift_num, {})
+
+        for field, value in shift_data.items():
+            number = finite_number(value)
+
+            if number != 0:
+                label = FIELD_LABELS.get(field, field)
+                future_values.append(
+                    f"Смена {shift_num}: {label}={number:g}"
+                )
+
+    details = "; ".join(future_values[:20])
+
+    raise ReportDataError(
+        f"В отчёте найдены ненулевые данные за будущую производственную дату "
+        f"{report_day:%d.%m.%Y}. "
+        f"Найдено: {details}"
+    )
 
         all_valid_by_day[day_num] = shifts
         valid_days.append((day_num, report_day))
