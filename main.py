@@ -527,7 +527,15 @@ def db_save_daily(
     сутки сохраняются как возможная остановка. Ненулевые будущие даты
     отклоняются, а текущая дата не попадает в суточный баланс.
     """
-    today = today or local_now().date()
+    now_local = local_now()
+calendar_today = today or now_local.date()
+
+# Производственные сутки начинаются в 19:30.
+# После 19:30 ночная Смена 1 уже относится к следующей дате отчёта.
+if today is None and (now_local.hour, now_local.minute) >= (19, 30):
+    production_today = calendar_today + timedelta(days=1)
+else:
+    production_today = calendar_today
     by_day = parsed.get("daily_by_shift", {})
 
     valid_days: list[tuple[int, date]] = []
@@ -545,13 +553,13 @@ def db_save_daily(
             raise ReportDataError(
                 f"Некорректная дата в отчёте: {raw_day}.{month:02d}.{year}"
             ) from exc
-        if report_day > today:
-            if not has_measurements:
-                continue
-            raise ReportDataError(
-                f"В отчёте найдены ненулевые данные за будущую дату "
-                f"{report_day:%d.%m.%Y}. Проверьте период файла."
-            )
+        if report_day > production_today:
+    if not has_measurements:
+        continue
+    raise ReportDataError(
+        f"В отчёте найдены ненулевые данные за будущую производственную дату "
+        f"{report_day:%d.%m.%Y}. Проверьте период файла."
+    )
         all_valid_by_day[day_num] = shifts
         valid_days.append((day_num, report_day))
         if has_measurements:
@@ -565,10 +573,11 @@ def db_save_daily(
     # Все прошедшие нулевые сутки сохраняются как возможная остановка.
     # Пустые колонки текущего и будущих дней не считаются фактическими данными.
     data_days = [
-        (day_num, report_day)
-        for day_num, report_day in valid_days
-        if report_day < today or _day_has_measurements(all_valid_by_day[day_num])
-    ]
+    (day_num, report_day)
+    for day_num, report_day in valid_days
+    if report_day < production_today
+    or _day_has_measurements(all_valid_by_day[day_num])
+]
     data_days.sort()
     by_day = {day_num: all_valid_by_day[day_num] for day_num, _report_day in data_days}
     max_day = data_days[-1][0]
@@ -579,9 +588,13 @@ def db_save_daily(
     # Поэтому резервно определяем незавершённый день по последней дате с
     # фактическими показаниями, а не только по совпадению с ``today``.
     incomplete_day = next(
-        (day_num for day_num, report_day in data_days if report_day == today),
-        None,
-    )
+    (
+        day_num
+        for day_num, report_day in data_days
+        if report_day == production_today
+    ),
+    None,
+)
     if incomplete_day is None and measured_days:
         last_measured_day, _last_measured_date = max(
             measured_days, key=lambda item: item[1]
@@ -594,10 +607,10 @@ def db_save_daily(
             incomplete_day = last_measured_day
 
     completed_days = [
-        day_num
-        for day_num, report_day in data_days
-        if report_day < today and day_num != incomplete_day
-    ]
+    day_num
+    for day_num, report_day in data_days
+    if report_day < production_today and day_num != incomplete_day
+]
 
     base_fields = ["year", "month", "day_num", "report_date", "source"] + FIELDS
     cols = ",".join(base_fields)
