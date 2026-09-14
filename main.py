@@ -557,33 +557,37 @@ def db_save_daily(
                 f"Некорректная дата в отчёте: {raw_day}.{month:02d}.{year}"
             ) from exc
 
-        if report_day > production_today:
-    if not has_measurements:
-        continue
+                if report_day > production_today:
+            if not has_measurements:
+                continue
 
-    future_values = []
+            future_values = []
 
-    for shift_num in (1, 2):
-        shift_data = shifts.get(shift_num, {})
+            for shift_num in (1, 2):
+                shift_data = shifts.get(shift_num, {})
 
-        for field, value in shift_data.items():
-            number = finite_number(value)
+                for field, value in shift_data.items():
+                    number = finite_number(value)
 
-            if number != 0:
-                label = FIELD_LABELS.get(field, field)
-                future_values.append(
-                    f"Смена {shift_num}: {label}={number:g}"
-                )
+                    if number != 0:
+                        label = FIELD_LABELS.get(field, field)
+                        future_values.append(
+                            f"Смена {shift_num}: {label}={number:g}"
+                        )
 
-    details = "; ".join(future_values[:20])
+            details = "; ".join(future_values[:20])
 
-    raise ReportDataError(
-        f"В отчёте найдены ненулевые данные за будущую производственную дату "
-        f"{report_day:%d.%m.%Y}. "
-        f"Найдено: {details}"
-    )
+            raise ReportDataError(
+                f"В отчёте найдены ненулевые данные за будущую производственную дату "
+                f"{report_day:%d.%m.%Y}. "
+                f"Найдено: {details}"
+            )
 
         all_valid_by_day[day_num] = shifts
+        valid_days.append((day_num, report_day))
+
+        if has_measurements:
+            measured_days.append((day_num, report_day))
         valid_days.append((day_num, report_day))
 
         if has_measurements:
