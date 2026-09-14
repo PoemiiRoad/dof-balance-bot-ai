@@ -2063,7 +2063,6 @@ async def handle_report(msg: Message, state: FSMContext):
                 fn,
                 report_year,
                 report_month,
-                now.date(),
             )
     except ReportDataError as exc:
         await wait_msg.edit_text(f"⚠️ Отчёт не сохранён: {exc}")
