@@ -5,10 +5,36 @@
 """
 
 import math
+import os
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from itertools import pairwise
+
+# AI runtime defaults are applied here because balance_logic is imported by main.py
+# before main.py reads AI_TIMEOUT_SECONDS and before ClaudeAgentOptions is created.
+# Force the requested 180-second ceiling even if an older Railway variable still
+# contains 90, and enable Agent SDK partial-message streaming without changing
+# the current Telegram response flow.
+os.environ["AI_TIMEOUT_SECONDS"] = "180"
+
+try:
+    from claude_agent_sdk import ClaudeAgentOptions as _ClaudeAgentOptions
+except ImportError:
+    _ClaudeAgentOptions = None
+
+if _ClaudeAgentOptions is not None and not getattr(
+    _ClaudeAgentOptions, "_dof_streaming_patched", False
+):
+    _original_claude_options_init = _ClaudeAgentOptions.__init__
+
+    def _dof_streaming_options_init(self, *args, **kwargs):
+        kwargs.setdefault("include_partial_messages", True)
+        _original_claude_options_init(self, *args, **kwargs)
+
+    _ClaudeAgentOptions.__init__ = _dof_streaming_options_init
+    _ClaudeAgentOptions._dof_streaming_patched = True
+
 
 FIELDS = [
     "kv4",
