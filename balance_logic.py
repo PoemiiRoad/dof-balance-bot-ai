@@ -20,7 +20,7 @@ from itertools import pairwise
 os.environ["AI_TIMEOUT_SECONDS"] = "300"
 
 _dof_ai_started_at: float | None = None
-_dof_first_stream_logged = False
+_dof_first_text_logged = False
 
 try:
     from claude_agent_sdk import ClaudeAgentOptions as _ClaudeAgentOptions
@@ -33,39 +33,51 @@ if _ClaudeAgentOptions is not None and not getattr(
     _original_claude_options_init = _ClaudeAgentOptions.__init__
 
     def _dof_streaming_options_init(self, *args, **kwargs):
-        global _dof_ai_started_at, _dof_first_stream_logged
+        global _dof_ai_started_at, _dof_first_text_logged
         kwargs.setdefault("include_partial_messages", True)
+        # Medium сохраняет нормальное качество анализа, но уменьшает избыточное
+        # внутреннее рассуждение относительно высокого effort по умолчанию.
+        kwargs.setdefault("effort", "medium")
         _dof_ai_started_at = time.monotonic()
-        _dof_first_stream_logged = False
+        _dof_first_text_logged = False
         _original_claude_options_init(self, *args, **kwargs)
 
     _ClaudeAgentOptions.__init__ = _dof_streaming_options_init
     _ClaudeAgentOptions._dof_streaming_patched = True
 
-# Логируем только первое streaming-событие каждого AI-запроса. AI_REQUEST_LOCK
-# в main.py не допускает параллельных запросов, поэтому одного таймера достаточно.
+# Логируем не первое служебное StreamEvent, а первый реальный текстовый delta.
+# Это показывает, когда Claude фактически начал формировать ответ.
 try:
     from claude_agent_sdk.types import StreamEvent as _ClaudeStreamEvent
 except ImportError:
     _ClaudeStreamEvent = None
 
 if _ClaudeStreamEvent is not None and not getattr(
-    _ClaudeStreamEvent, "_dof_first_event_patched", False
+    _ClaudeStreamEvent, "_dof_first_text_patched", False
 ):
     _original_stream_event_init = _ClaudeStreamEvent.__init__
 
     def _dof_stream_event_init(self, *args, **kwargs):
-        global _dof_first_stream_logged
+        global _dof_first_text_logged
         _original_stream_event_init(self, *args, **kwargs)
-        if not _dof_first_stream_logged and _dof_ai_started_at is not None:
-            elapsed = time.monotonic() - _dof_ai_started_at
-            logging.getLogger("dof.ai.stream").warning(
-                "Claude first StreamEvent after %.1f s", elapsed
-            )
-            _dof_first_stream_logged = True
+        if _dof_first_text_logged or _dof_ai_started_at is None:
+            return
+        event = getattr(self, "event", None)
+        if not isinstance(event, dict) or event.get("type") != "content_block_delta":
+            return
+        delta = event.get("delta") or {}
+        if not isinstance(delta, dict):
+            return
+        if delta.get("type") != "text_delta" or not delta.get("text"):
+            return
+        elapsed = time.monotonic() - _dof_ai_started_at
+        logging.getLogger("dof.ai.stream").warning(
+            "Claude first text_delta after %.1f s", elapsed
+        )
+        _dof_first_text_logged = True
 
     _ClaudeStreamEvent.__init__ = _dof_stream_event_init
-    _ClaudeStreamEvent._dof_first_event_patched = True
+    _ClaudeStreamEvent._dof_first_text_patched = True
 
 
 # Дополнительные постоянные правила для AI. main.py импортирует balance_logic
@@ -100,10 +112,8 @@ _AI_COMMON_MODE_RULES = """
 независимую ожидаемую сумму для сравнения с К34: это может привести к двойному
 учёту одного материала.
 
-При диагностике ранжируй минимум три конкурирующие версии:
-1) занижение входных весов;
-2) завышение одного или нескольких выходных весов;
-3) неучтённый маршрут, возврат или изменение запасов.
+Если причина неоднозначна, сравни до трёх наиболее обоснованных версий.
+Не создавай дополнительные версии только ради количества.
 Сравни, какая версия лучше одновременно объясняет Б, БС, дубли и нормы потоков.
 """
 
@@ -116,36 +126,94 @@ if _balance_monitor is not None and _AI_COMMON_MODE_RULES not in _balance_monito
     _balance_monitor.AI_RULES += _AI_COMMON_MODE_RULES
 
 
-def _install_main_ai_diagnostics() -> None:
-    """После загрузки main.py оборачивает ask_ai и пишет только размеры prompt."""
+_PASSPORT_CAPACITY_NOTE = """
+
+ПАСПОРТНАЯ ПРОИЗВОДИТЕЛЬНОСТЬ — только справка для проверки физической
+реализуемости потока, а не вход в формулы материального баланса:
+К4/К3 — 6400 т/ч; К14/15/24/31/32 — 2500 т/ч; К33/34 — 3200 т/ч;
+К10/34А — 1250 т/ч; К101/102 — 800 т/ч.
+Не подменяй фактические показания весов паспортной производительностью.
+"""
+
+
+def _compact_system_prompt(prompt: str) -> str:
+    """Убирает мощности из каждой ветви схемы и оставляет одну компактную справку."""
+    compact = re.sub(
+        r"\s*\((?:6400|3200|2500|1250|800)\s*т/ч\)",
+        "",
+        prompt,
+        flags=re.IGNORECASE,
+    )
+    compact = re.sub(
+        r"\s*\((?:6000\s*т?\s*каждый|1000\s*т?)\)",
+        "",
+        compact,
+        flags=re.IGNORECASE,
+    )
+    if _PASSPORT_CAPACITY_NOTE.strip() not in compact:
+        compact = compact.rstrip() + _PASSPORT_CAPACITY_NOTE
+    return compact
+
+
+def _install_main_ai_runtime_patch() -> None:
+    """После загрузки main.py чистит контекст и включает диагностические логи."""
     log = logging.getLogger("dof.ai.prompt")
     for _ in range(1200):
         main_module = sys.modules.get("__main__")
         ask_ai = getattr(main_module, "ask_ai", None) if main_module else None
-        if ask_ai is not None:
-            if getattr(ask_ai, "_dof_prompt_diag_wrapped", False):
-                return
+        make_ai_context = (
+            getattr(main_module, "make_ai_context", None) if main_module else None
+        )
+        system_prompt = (
+            getattr(main_module, "SYSTEM_PROMPT", None) if main_module else None
+        )
+        if ask_ai is not None and make_ai_context is not None and isinstance(system_prompt, str):
+            # SYSTEM_PROMPT остаётся единственным местом постоянных AI_RULES.
+            main_module.SYSTEM_PROMPT = _compact_system_prompt(system_prompt)
 
-            async def _logged_ask_ai(question, context, user_id, _original=ask_ai):
-                system_prompt = getattr(main_module, "SYSTEM_PROMPT", "")
-                total_prompt = (
-                    f"ВОПРОС ПОЛЬЗОВАТЕЛЯ:\n{question}\n\n"
-                    f"ДАННЫЕ ИЗ ОТЧЁТА:\n{context}"
-                )
-                log.warning("AI SYSTEM_PROMPT chars=%s", len(system_prompt))
-                log.warning("AI context chars=%s", len(context))
-                log.warning("AI total prompt chars=%s", len(total_prompt))
-                return await _original(question, context, user_id)
+            if not getattr(make_ai_context, "_dof_rules_dedup_wrapped", False):
+                original_make_ai_context = make_ai_context
 
-            _logged_ask_ai._dof_prompt_diag_wrapped = True
-            main_module.ask_ai = _logged_ask_ai
+                def _make_ai_context_without_rules(*args, **kwargs):
+                    context = original_make_ai_context(*args, **kwargs)
+                    rules = (
+                        getattr(_balance_monitor, "AI_RULES", "")
+                        if _balance_monitor is not None
+                        else ""
+                    )
+                    if rules and context.startswith(rules):
+                        context = context[len(rules):].lstrip()
+                    return context
+
+                _make_ai_context_without_rules._dof_rules_dedup_wrapped = True
+                main_module.make_ai_context = _make_ai_context_without_rules
+
+            if not getattr(ask_ai, "_dof_prompt_diag_wrapped", False):
+                original_ask_ai = ask_ai
+
+                async def _logged_ask_ai(question, context, user_id, _original=original_ask_ai):
+                    current_system_prompt = getattr(main_module, "SYSTEM_PROMPT", "")
+                    total_prompt = (
+                        f"ВОПРОС ПОЛЬЗОВАТЕЛЯ:\n{question}\n\n"
+                        f"ДАННЫЕ ИЗ ОТЧЁТА:\n{context}"
+                    )
+                    log.warning("AI SYSTEM_PROMPT chars=%s", len(current_system_prompt))
+                    log.warning("AI context chars=%s", len(context))
+                    log.warning("AI total prompt chars=%s", len(total_prompt))
+                    return await _original(question, context, user_id)
+
+                _logged_ask_ai._dof_prompt_diag_wrapped = True
+                main_module.ask_ai = _logged_ask_ai
+
+            # Маркер, чтобы /version позволял проверить, что именно эта правка запущена.
+            main_module.BUILD_VERSION = "2026.09.16-ai-medium-dedup-v1"
             return
         time.sleep(0.05)
 
 
 threading.Thread(
-    target=_install_main_ai_diagnostics,
-    name="dof-ai-diagnostics",
+    target=_install_main_ai_runtime_patch,
+    name="dof-ai-runtime-patch",
     daemon=True,
 ).start()
 
