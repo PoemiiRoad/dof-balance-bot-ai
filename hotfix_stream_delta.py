@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# One-shot tested migration for non-text Claude stream events.
 main_path = Path("main.py")
 main = main_path.read_text(encoding="utf-8")
 old = '''                    if delta.get("type") == "text_delta":\n                        chunk = delta.get("text", "")\n                    if chunk:\n                        if first_text_s is None:\n                            first_text_s = loop.time() - started\n                            logger.warning("Claude first text_delta after %.1f s", first_text_s)\n                        stream_parts.append(chunk)\n'''
