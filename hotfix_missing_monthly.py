@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# One-shot tested migration for the monthly missing-data edge case.
 main_path = Path("main.py")
 main = main_path.read_text(encoding="utf-8")
 replacements = {
