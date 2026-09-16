@@ -198,7 +198,7 @@ class HandlerSmokeTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_read_only_menu_handlers_render(self):
         handlers_and_phrases = (
             (main.report_daily, "Суточный баланс"),
-            (main.report_night_shift, "Ночная смена"),
+            (main.report_night_shift, "ночная смена"),
             (main.report_sliding_balance, "Скользящий баланс"),
             (main.report_weekly, "Сводка за"),
             (main.report_monthly, "Месячный итог"),
@@ -310,43 +310,33 @@ class HandlerSmokeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AIClientTests(unittest.IsolatedAsyncioTestCase):
-    async def test_ai_is_explicitly_disabled_without_api_key(self):
-        with patch.object(main, "ANTHROPIC_API_KEY", None):
-            answer = await main.ask_ai("вопрос", "контекст")
-        self.assertIn("не задан ANTHROPIC_API_KEY", answer)
-
-    async def test_ai_text_blocks_and_length_stop_are_handled(self):
-        response = FakeAIResponse(
-            payload={
-                "content": [
-                    {"type": "text", "text": "Первая часть"},
-                    {"type": "tool_use", "name": "ignored"},
-                    {"type": "text", "text": "Вторая часть"},
-                ],
-                "stop_reason": "max_tokens",
-            }
-        )
-        session = FakeAISession(response)
+    async def test_ai_is_explicitly_disabled_without_oauth_token(self):
         with (
-            patch.object(main, "ANTHROPIC_API_KEY", "test-key"),
-            patch.object(main.aiohttp, "ClientSession", return_value=session),
+            patch.object(main, "ALLOWED_USER_IDS", {101}),
+            patch.object(main, "CLAUDE_CODE_OAUTH_TOKEN", ""),
         ):
-            answer = await main.ask_ai("вопрос", "контекст")
+            answer = await main.ask_ai("вопрос", "контекст", 101)
+        self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", answer)
 
-        self.assertIn("Первая часть\nВторая часть", answer)
-        self.assertIn("лимиту длины", answer)
-        self.assertEqual(session.request[0], "https://api.anthropic.com/v1/messages")
-        self.assertEqual(session.request[1]["json"]["model"], main.AI_MODEL)
-
-    async def test_ai_unexpected_json_does_not_crash_handler(self):
-        session = FakeAISession(FakeAIResponse(payload=["unexpected"]))
+    async def test_ai_returns_agent_sdk_text(self):
         with (
-            patch.object(main, "ANTHROPIC_API_KEY", "test-key"),
-            patch.object(main.aiohttp, "ClientSession", return_value=session),
+            patch.object(main, "ALLOWED_USER_IDS", {101}),
+            patch.object(main, "CLAUDE_CODE_OAUTH_TOKEN", "test-oauth"),
+            patch.object(main, "CLAUDE_AUTH_CONFLICTS", ()),
+            patch.object(main, "_run_claude_agent", AsyncMock(return_value=("Первая часть\nВторая часть", None, None))),
         ):
-            answer = await main.ask_ai("вопрос", "контекст")
+            answer = await main.ask_ai("вопрос", "контекст", 101)
+        self.assertEqual(answer, "Первая часть\nВторая часть")
 
-        self.assertIn("неизвестного формата", answer)
+    async def test_ai_rate_limit_is_user_facing(self):
+        with (
+            patch.object(main, "ALLOWED_USER_IDS", {101}),
+            patch.object(main, "CLAUDE_CODE_OAUTH_TOKEN", "test-oauth"),
+            patch.object(main, "CLAUDE_AUTH_CONFLICTS", ()),
+            patch.object(main, "_run_claude_agent", AsyncMock(return_value=("", "rate_limit", 429))),
+        ):
+            answer = await main.ask_ai("вопрос", "контекст", 101)
+        self.assertIn("Лимит использования Claude Pro", answer)
 
 
 if __name__ == "__main__":

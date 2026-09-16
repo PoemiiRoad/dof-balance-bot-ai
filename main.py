@@ -59,7 +59,7 @@ load_dotenv(BASE_DIR / ".env")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-BUILD_VERSION = "2026.09.15-claude-stream-180-v1"
+BUILD_VERSION = "2026.09.16-robust-ai-v3"
 
 # ════════════════════════════════════════════════════════
 #  НАСТРОЙКИ
@@ -84,7 +84,7 @@ CLAUDE_AUTH_CONFLICTS = tuple(
 )
 
 try:
-    AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "180"))
+    AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "300"))
 except ValueError as exc:
     raise RuntimeError("AI_TIMEOUT_SECONDS должен быть целым числом") from exc
 if not 30 <= AI_TIMEOUT_SECONDS <= 300:
@@ -305,18 +305,36 @@ def finite_number(value, default: float = 0.0) -> float:
     return number if math.isfinite(number) else default
 
 
-def calc_produced(d: dict) -> float:
-    """Произведено = (44+44Д)/2 + 46Д + (74+74Д)/2"""
-    avg44 = (finite_number(d.get("kv44")) + finite_number(d.get("kv44d"))) / 2
-    k46d = finite_number(d.get("kv46d"))
-    avg74 = (finite_number(d.get("kv74")) + finite_number(d.get("kv74d"))) / 2
-    return avg44 + k46d + avg74
+STOCK_PRODUCED_FIELDS = ("kv44", "kv44d", "kv46d", "kv74", "kv74d")
+STOCK_SHIPPED_FIELDS = ("kv65mps", "kv65cpo", "kv66mps", "kv66cpo", "kv84mps", "kv84cpo")
 
 
-def calc_shipped(d: dict) -> float:
-    """Отгружено = 65МПС+65ЦПО+66МПС+66ЦПО+84МПС+84ЦПО"""
-    keys = ["kv65mps", "kv65cpo", "kv66mps", "kv66cpo", "kv84mps", "kv84cpo"]
-    return sum(finite_number(d.get(key)) for key in keys)
+def _stock_numbers(d: dict, keys: tuple[str, ...]) -> list[float] | None:
+    values = []
+    for key in keys:
+        raw = d.get(key)
+        if raw is None:
+            return None
+        value = finite_number(raw, default=math.nan)
+        if not math.isfinite(value):
+            return None
+        values.append(value)
+    return values
+
+
+def calc_produced(d: dict) -> float | None:
+    """Произведено = (44+44Д)/2 + 46Д + (74+74Д)/2."""
+    values = _stock_numbers(d, STOCK_PRODUCED_FIELDS)
+    if values is None:
+        return None
+    kv44, kv44d, kv46d, kv74, kv74d = values
+    return (kv44 + kv44d) / 2 + kv46d + (kv74 + kv74d) / 2
+
+
+def calc_shipped(d: dict) -> float | None:
+    """Отгружено = 65МПС+65ЦПО+66МПС+66ЦПО+84МПС+84ЦПО."""
+    values = _stock_numbers(d, STOCK_SHIPPED_FIELDS)
+    return None if values is None else sum(values)
 
 
 # ════════════════════════════════════════════════════════
@@ -524,6 +542,23 @@ def _day_has_measurements(shifts: dict) -> bool:
     )
 
 
+def _completed_shift_value(shift_1: dict, shift_2: dict, field: str) -> float | None:
+    if field not in shift_1 or field not in shift_2:
+        return None
+    first = finite_number(shift_1[field], default=math.nan)
+    second = finite_number(shift_2[field], default=math.nan)
+    if not math.isfinite(first) or not math.isfinite(second):
+        return None
+    return first + second
+
+
+def _single_shift_value(shift: dict, field: str) -> float | None:
+    if field not in shift:
+        return None
+    value = finite_number(shift[field], default=math.nan)
+    return value if math.isfinite(value) else None
+
+
 def db_save_daily(
     parsed: dict,
     user_id: int,
@@ -623,17 +658,6 @@ def db_save_daily(
         None,
     )
 
-    if incomplete_day is None and measured_days:
-        last_measured_day, _last_measured_date = max(
-            measured_days, key=lambda item: item[1]
-        )
-        last_shifts = all_valid_by_day[last_measured_day]
-
-        if (
-            _shift_has_measurements(last_shifts.get(1, {}))
-            and not _shift_has_measurements(last_shifts.get(2, {}))
-        ):
-            incomplete_day = last_measured_day
 
     completed_days = [
         day_num
@@ -680,8 +704,7 @@ def db_save_daily(
             shift_1 = shifts.get(1, {})
             shift_2 = shifts.get(2, {})
             values = {
-                field: finite_number(shift_1.get(field))
-                + finite_number(shift_2.get(field))
+                field: _completed_shift_value(shift_1, shift_2, field)
                 for field in FIELDS
             }
             record = {
@@ -704,7 +727,7 @@ def db_save_daily(
                     "month": month,
                     "day_num": night_day,
                     "source": filename,
-                    **{field: finite_number(shift_1.get(field)) for field in FIELDS},
+                    **{field: _single_shift_value(shift_1, field) for field in FIELDS},
                 }
                 conn.execute(night_sql, list(night_record.values()))
 
@@ -732,6 +755,8 @@ def db_save_daily(
             fresh_data = dict(daily_row)
             produced = calc_produced(fresh_data)
             shipped = calc_shipped(fresh_data)
+            if produced is None or shipped is None:
+                continue
             ves_izm = produced - shipped
             marksh_izm = finite_number(stock_row["stock_curr"]) - finite_number(
                 stock_row["stock_prev"]
@@ -852,6 +877,10 @@ def db_save_stock(
         data = dict(row)
         produced = calc_produced(data)
         shipped = calc_shipped(data)
+        if produced is None or shipped is None:
+            raise ReportDataError(
+                "Недостаточно показаний весов для расчёта склада; пропуски не заменяются нулём."
+            )
         ves_izm = produced - shipped
         marksh_izm = stock_curr - stock_prev
         nesovpadenie = ves_izm - marksh_izm
@@ -1338,7 +1367,7 @@ def parse_report(file_bytes: bytes, filename: str) -> dict:
         labels = ", ".join(FIELD_LABELS.get(key, key) for key in missing_fields)
         result["warnings"].append(
             f"Не найдены строки, используемые в {purpose}: {labels}. "
-            "Для них будет использовано значение 0."
+            "Расчёты, которым нужны эти показания, будут недоступны; ноль вместо пропуска не подставляется."
         )
 
     result["daily_by_shift"] = daily_by_shift
@@ -1346,19 +1375,31 @@ def parse_report(file_bytes: bytes, filename: str) -> dict:
     return result
 
 
-def pct(v: float, base: float) -> float:
-    value = finite_number(v)
-    denominator = finite_number(base)
-    return value / denominator * 100 if denominator else 0.0
+def pct(v: float | None, base: float | None) -> float | None:
+    if v is None or base is None:
+        return None
+    value = finite_number(v, default=math.nan)
+    denominator = finite_number(base, default=math.nan)
+    if not math.isfinite(value) or not math.isfinite(denominator) or denominator == 0:
+        return None
+    return value / denominator * 100
 
 
-def check_norm(val: float, base: float, key: str) -> tuple:
-    base = finite_number(base)
-    val = finite_number(val)
-    if not base or key not in NORMS:
-        return "none", 0.0
+def pct_text(v: float | None, base: float | None, digits: int = 0) -> str:
+    value = pct(v, base)
+    return "—" if value is None else f"{value:.{digits}f}%"
+
+
+def check_norm(val: float | None, base: float | None, key: str) -> tuple:
+    if key not in NORMS:
+        return "none", None
     p = pct(val, base)
-    if val <= 0:
+    if p is None:
+        return "none", None
+    value = finite_number(val, default=math.nan)
+    if not math.isfinite(value):
+        return "none", None
+    if value <= 0:
         return "crit", p
     mn, mx = NORMS[key][0], NORMS[key][1]
     margin = (mx - mn) * 0.5
@@ -1369,7 +1410,9 @@ def check_norm(val: float, base: float, key: str) -> tuple:
     return "crit", p
 
 
-def check_doubles(val_main: float, val_dup: float) -> tuple:
+def check_doubles(val_main: float | None, val_dup: float | None) -> tuple:
+    if val_main is None or val_dup is None:
+        return "missing", None, None
     val_main = finite_number(val_main)
     val_dup = finite_number(val_dup)
     if not val_main and not val_dup:
@@ -1428,7 +1471,7 @@ def fmt2(v) -> str:
 
 def build_alerts(d: dict, label: str = "", include_balances: bool = True) -> list:
     alerts = []
-    base4, base3 = d.get("kv4", 0), d.get("kv3", 0)
+    base4, base3 = d.get("kv4"), d.get("kv3")
     prefix = f"[{label}] " if label else ""
 
     if include_balances:
@@ -1465,8 +1508,8 @@ def build_alerts(d: dict, label: str = "", include_balances: bool = True) -> lis
         ("kv101", base3),
     ]
     for key, base in checks:
-        val = d.get(key, 0)
-        if not finite_number(base):
+        val = d.get(key)
+        if base is None or not finite_number(base):
             continue
         st, p = check_norm(val, base, key)
         if st in ("warn", "crit"):
@@ -1475,22 +1518,16 @@ def build_alerts(d: dict, label: str = "", include_balances: bool = True) -> lis
                 (st, f"{em_norm(st)} {prefix}{desc}: {p:.1f}% (норма {mn}–{mx}%)")
             )
 
-    st4, p4, t4 = check_doubles(base4, d.get("kv4d", 0))
-    if st4 in ("warn", "crit"):
-        alerts.append(
-            (
-                st4,
-                f"{em_dup(st4)} {prefix}Конв.4 vs 4Д: расхождение {p4:.2f}% ({fmt(t4)} т)",
-            )
-        )
-    st3, p3, t3 = check_doubles(base3, d.get("kv3d", 0))
-    if st3 in ("warn", "crit"):
-        alerts.append(
-            (
-                st3,
-                f"{em_dup(st3)} {prefix}Конв.3 vs 3Д: расхождение {p3:.2f}% ({fmt(t3)} т)",
-            )
-        )
+    st4, p4, t4 = check_doubles(base4, d.get("kv4d"))
+    if st4 == "missing":
+        alerts.append(("warn", f"⚠️ {prefix}Конв.4 vs 4Д: нет одного из показаний"))
+    elif st4 in ("warn", "crit"):
+        alerts.append((st4, f"{em_dup(st4)} {prefix}Конв.4 vs 4Д: расхождение {p4:.2f}% ({fmt(t4)} т)"))
+    st3, p3, t3 = check_doubles(base3, d.get("kv3d"))
+    if st3 == "missing":
+        alerts.append(("warn", f"⚠️ {prefix}Конв.3 vs 3Д: нет одного из показаний"))
+    elif st3 in ("warn", "crit"):
+        alerts.append((st3, f"{em_dup(st3)} {prefix}Конв.3 vs 3Д: расхождение {p3:.2f}% ({fmt(t3)} т)"))
 
     return alerts
 
@@ -1565,6 +1602,9 @@ async def _run_claude_agent(prompt: str) -> tuple[str, str | None, int | None]:
     stream_parts: list[str] = []
     final_result: ResultMessage | None = None
     assistant_error: str | None = None
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    first_text_s: float | None = None
 
     options = ClaudeAgentOptions(
         model=AI_MODEL,
@@ -1576,6 +1616,7 @@ async def _run_claude_agent(prompt: str) -> tuple[str, str | None, int | None]:
         setting_sources=[],
         skills=[],
         include_partial_messages=True,
+        effort="medium",
         env={
             "CLAUDE_CODE_OAUTH_TOKEN": CLAUDE_CODE_OAUTH_TOKEN,
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
@@ -1592,8 +1633,11 @@ async def _run_claude_agent(prompt: str) -> tuple[str, str | None, int | None]:
                     delta = event.get("delta", {})
                     if delta.get("type") == "text_delta":
                         chunk = delta.get("text", "")
-                        if chunk:
-                            stream_parts.append(chunk)
+                    if chunk:
+                        if first_text_s is None:
+                            first_text_s = loop.time() - started
+                            logger.warning("Claude first text_delta after %.1f s", first_text_s)
+                        stream_parts.append(chunk)
             elif isinstance(message, AssistantMessage):
                 if message.error:
                     assistant_error = str(message.error)
@@ -1637,7 +1681,7 @@ async def _run_claude_agent(prompt: str) -> tuple[str, str | None, int | None]:
         answer = "".join(stream_parts).strip()
     if not answer:
         answer = "\n".join(text_parts).strip()
-    logger.info("Claude Agent stream completed: %s text chunks", len(stream_parts))
+    logger.info("Claude Agent stream completed after %.1fs: %s text chunks", loop.time() - started, len(stream_parts))
     return answer, assistant_error, None
 
 
@@ -1688,6 +1732,9 @@ async def ask_ai(question: str, context: str, user_id: int | None) -> str:
         )
 
     prompt = f"ВОПРОС ПОЛЬЗОВАТЕЛЯ:\n{question}\n\nДАННЫЕ ИЗ ОТЧЁТА:\n{context}"
+    logger.warning("AI SYSTEM_PROMPT chars=%s", len(SYSTEM_PROMPT))
+    logger.warning("AI context chars=%s", len(context))
+    logger.warning("AI total prompt chars=%s", len(prompt))
     try:
         async with AI_REQUEST_LOCK:
             answer, error_type, status = await asyncio.wait_for(
@@ -1736,14 +1783,19 @@ AI_CONTEXT_FIELDS = (
 
 
 def _ai_tonnage_line(data: dict) -> str:
-    return "; ".join(
-        f"{label}={finite_number(data.get(key)):.2f} т"
-        for label, key in AI_CONTEXT_FIELDS
-    )
+    parts = []
+    for label, key in AI_CONTEXT_FIELDS:
+        raw = data.get(key)
+        if raw is None:
+            parts.append(f"{label}=нет показания")
+            continue
+        value = finite_number(raw, default=math.nan)
+        parts.append(f"{label}={value:.2f} т" if math.isfinite(value) else f"{label}=нет показания")
+    return "; ".join(parts)
 
 
 def make_ai_context(rows: list, rolling_rows: list | None = None) -> str:
-    from balance_monitor import AI_RULES, analyze, record_date, render, calculate, SPECS
+    from balance_monitor import analyze, record_date, render, calculate, SPECS
     if not rows:
         return "Нет завершённых суток с данными."
     try:
@@ -1755,7 +1807,7 @@ def make_ai_context(rows: list, rolling_rows: list | None = None) -> str:
         end = record_date(full_days[-1])
         history = rolling_rows if rolling_rows is not None else full_days
         report = analyze(history, end, today, WARN_PCT, CRIT_PCT)
-        lines = [AI_RULES, "ФАКТИЧЕСКИЕ СУТОЧНЫЕ ПОКАЗАНИЯ:"]
+        lines = ["ФАКТИЧЕСКИЕ СУТОЧНЫЕ ПОКАЗАНИЯ:"]
         for row in full_days:
             lines.append(f"Дата {record_date(row):%d.%m.%Y}: {_ai_tonnage_line(row)}")
         from balance_monitor import metric
@@ -1769,7 +1821,7 @@ def make_ai_context(rows: list, rolling_rows: list | None = None) -> str:
                 row, label=f"{record_date(row):%d.%m.%Y}", include_balances=False))
         return "\n".join(lines)
     except (ValueError, TypeError, KeyError) as exc:
-        return AI_RULES + f"\nРасчёт заблокирован: {exc}. Не делай выводов о балансе."
+        return f"Расчёт заблокирован: {exc}. Не делай выводов о балансе."
 
 
 
@@ -2502,11 +2554,11 @@ async def report_doubles(msg: Message, state: FSMContext):
     ]
     lines.append("`Дн  Кв4 vs 4Д     Кв3 vs 3Д`")
     for r in rows:
-        st4, p4, _ = check_doubles(r.get("kv4", 0), r.get("kv4d", 0))
-        st3, p3, _ = check_doubles(r.get("kv3", 0), r.get("kv3d", 0))
-        lines.append(
-            f"`{r['day_num']:>2d}   {em_dup(st4)}{p4:>5.2f}%      {em_dup(st3)}{p3:>5.2f}%`"
-        )
+        st4, p4, _ = check_doubles(r.get("kv4"), r.get("kv4d"))
+        st3, p3, _ = check_doubles(r.get("kv3"), r.get("kv3d"))
+        left = "⬜ нет данных" if st4 == "missing" else f"{em_dup(st4)}{p4:>5.2f}%"
+        right = "⬜ нет данных" if st3 == "missing" else f"{em_dup(st3)}{p3:>5.2f}%"
+        lines.append(f"`{r['day_num']:>2d}   {left:<12s}  {right}`")
     await answer_markdown(msg, "\n".join(lines))
 
 
@@ -2577,6 +2629,9 @@ async def stock_input_start(msg: Message, state: FSMContext):
         return
 
     row = rows[-1]
+    if calc_produced(row) is None or calc_shipped(row) is None:
+        await msg.answer("⚠️ Для последнего дня не хватает показаний весов склада; пропуски не заменяются нулём.")
+        return
     day_num = row["day_num"]
     db_year = row["year"]
     db_month = row["month"]
@@ -2711,6 +2766,9 @@ async def stock_night_start(msg: Message, state: FSMContext):
     db_month = ns["month"]
     produced = calc_produced(ns)
     shipped = calc_shipped(ns)
+    if produced is None or shipped is None:
+        await msg.answer("⚠️ В ночной смене не хватает показаний весов склада; пропуски не заменяются нулём.")
+        return
 
     await state.update_data(
         day_num=day_num,

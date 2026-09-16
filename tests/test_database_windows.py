@@ -15,10 +15,9 @@ from balance_logic import rolling_snapshots
 
 
 def shifts(kv4, kv34):
-    return {
-        1: {"kv4": kv4 / 2, "kv34": kv34 / 2},
-        2: {"kv4": kv4 / 2, "kv34": kv34 / 2},
-    }
+    def one(input_value, output_value):
+        return {"kv4": input_value, "kv34": output_value, "kv102": 0, "kv24p": 0, "kv24hv": 0, "kv28a1": 0, "kv44": 0, "kv44d": 0, "kv46d": 0, "kv74": 0, "kv74d": 0, "kv65mps": 0, "kv65cpo": 0, "kv66mps": 0, "kv66cpo": 0, "kv84mps": 0, "kv84cpo": 0}
+    return {1: one(kv4 / 2, kv34 / 2), 2: one(kv4 / 2, kv34 / 2)}
 
 
 class DatabaseWindowTests(unittest.TestCase):
@@ -95,7 +94,7 @@ class DatabaseWindowTests(unittest.TestCase):
         labels = [
             [button.text for button in row] for row in main.main_keyboard().keyboard
         ]
-        self.assertIn(["📉 Просмотр проскальзывания"], labels)
+        self.assertIn(["📉 Скользящий баланс"], labels)
 
     def test_buttons_are_scoped_to_the_last_uploaded_report(self):
         old_report = {
@@ -347,8 +346,8 @@ class DatabaseWindowTests(unittest.TestCase):
             "period": "Отчёт за август 2026",
             "daily_by_shift": {
                 1: {
-                    1: {"kv4": 500, "kv44": 100, "kv44d": 100},
-                    2: {"kv4": 500, "kv44": 100, "kv44d": 100},
+                    1: {"kv4": 500, "kv44": 100, "kv44d": 100, "kv46d": 0, "kv74": 0, "kv74d": 0, "kv65mps": 0, "kv65cpo": 0, "kv66mps": 0, "kv66cpo": 0, "kv84mps": 0, "kv84cpo": 0},
+                    2: {"kv4": 500, "kv44": 100, "kv44d": 100, "kv46d": 0, "kv74": 0, "kv74d": 0, "kv65mps": 0, "kv65cpo": 0, "kv66mps": 0, "kv66cpo": 0, "kv84mps": 0, "kv84cpo": 0},
                 }
             },
         }
@@ -361,8 +360,8 @@ class DatabaseWindowTests(unittest.TestCase):
             "period": "Отчёт за август 2026",
             "daily_by_shift": {
                 1: {
-                    1: {"kv4": 500, "kv44": 200, "kv44d": 200},
-                    2: {"kv4": 500, "kv44": 200, "kv44d": 200},
+                    1: {"kv4": 500, "kv44": 200, "kv44d": 200, "kv46d": 0, "kv74": 0, "kv74d": 0, "kv65mps": 0, "kv65cpo": 0, "kv66mps": 0, "kv66cpo": 0, "kv84mps": 0, "kv84cpo": 0},
+                    2: {"kv4": 500, "kv44": 200, "kv44d": 200, "kv46d": 0, "kv74": 0, "kv74d": 0, "kv65mps": 0, "kv65cpo": 0, "kv66mps": 0, "kv66cpo": 0, "kv84mps": 0, "kv84cpo": 0},
                 }
             },
         }

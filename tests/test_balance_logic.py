@@ -22,6 +22,10 @@ def row(report_date, kv4, output):
         "day_num": int(report_date[8:10]),
         "kv4": kv4,
         "kv34": output,
+        "kv102": 0,
+        "kv24p": 0,
+        "kv24hv": 0,
+        "kv28a1": 0,
     }
 
 

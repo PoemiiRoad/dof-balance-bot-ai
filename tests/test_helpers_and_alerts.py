@@ -46,7 +46,7 @@ class HelpersAndAlertsTests(unittest.TestCase):
 
     def test_finite_helpers_do_not_emit_nan(self):
         data = {"kv44": math.nan, "kv44d": 100, "kv46d": math.inf}
-        self.assertEqual(main.calc_produced(data), 50)
+        self.assertIsNone(main.calc_produced(data))
         self.assertEqual(main.fmt(math.nan), "—")
         self.assertEqual(main.sign(math.inf), "—")
 
@@ -80,12 +80,13 @@ class HelpersAndAlertsTests(unittest.TestCase):
         ]
 
         context = main.make_ai_context(rows, rolling_rows)
+        from balance_monitor import AI_RULES
+        self.assertFalse(context.startswith(AI_RULES))
 
-        self.assertIn("ПОСУТОЧНЫЕ АБСОЛЮТНЫЕ ПОКАЗАНИЯ", context)
+        self.assertIn("ФАКТИЧЕСКИЕ СУТОЧНЫЕ ПОКАЗАНИЯ", context)
         self.assertIn("Дата 30.07.2026", context)
-        self.assertIn("Окно 3 сут.; 29–31.07.2026", context)
-        self.assertIn("К4=3000.00 т", context)
-        self.assertIn("последовательные даты: да", context)
+        self.assertIn("Окно 3 сут.: 29.07–31.07.2026", context)
+        self.assertIn("Дата 31.07.2026: К4=1000.00 т", context)
 
 
 if __name__ == "__main__":

@@ -1,135 +1,13 @@
 """Чистая логика материального и скользящего баланса.
 
-Модуль не зависит от Telegram и базы данных, поэтому формулы можно проверять
-обычными модульными тестами. Небольшой runtime-хук ниже временно синхронизирует
-AI-настройки main.py без дублирования правил в контексте.
+Модуль не зависит от Telegram, базы данных или AI runtime.
 """
 
-import logging
 import math
-import os
 import re
-import sys
-import threading
-import time
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from itertools import pairwise
-
-# main.py импортирует balance_logic до чтения AI_TIMEOUT_SECONDS.
-os.environ["AI_TIMEOUT_SECONDS"] = "300"
-
-_dof_ai_started_at: float | None = None
-_dof_first_text_logged = False
-
-try:
-    from claude_agent_sdk import ClaudeAgentOptions as _ClaudeAgentOptions
-except ImportError:
-    _ClaudeAgentOptions = None
-
-if _ClaudeAgentOptions is not None and not getattr(
-    _ClaudeAgentOptions, "_dof_streaming_patched", False
-):
-    _original_claude_options_init = _ClaudeAgentOptions.__init__
-
-    def _dof_streaming_options_init(self, *args, **kwargs):
-        global _dof_ai_started_at, _dof_first_text_logged
-        kwargs.setdefault("include_partial_messages", True)
-        kwargs.setdefault("effort", "medium")
-        _dof_ai_started_at = time.monotonic()
-        _dof_first_text_logged = False
-        _original_claude_options_init(self, *args, **kwargs)
-
-    _ClaudeAgentOptions.__init__ = _dof_streaming_options_init
-    _ClaudeAgentOptions._dof_streaming_patched = True
-
-try:
-    from claude_agent_sdk.types import StreamEvent as _ClaudeStreamEvent
-except ImportError:
-    _ClaudeStreamEvent = None
-
-if _ClaudeStreamEvent is not None and not getattr(
-    _ClaudeStreamEvent, "_dof_first_text_patched", False
-):
-    _original_stream_event_init = _ClaudeStreamEvent.__init__
-
-    def _dof_stream_event_init(self, *args, **kwargs):
-        global _dof_first_text_logged
-        _original_stream_event_init(self, *args, **kwargs)
-        if _dof_first_text_logged or _dof_ai_started_at is None:
-            return
-        event = getattr(self, "event", None)
-        if not isinstance(event, dict) or event.get("type") != "content_block_delta":
-            return
-        delta = event.get("delta") or {}
-        if not isinstance(delta, dict):
-            return
-        if delta.get("type") != "text_delta" or not delta.get("text"):
-            return
-        elapsed = time.monotonic() - _dof_ai_started_at
-        logging.getLogger("dof.ai.stream").warning(
-            "Claude first text_delta after %.1f s", elapsed
-        )
-        _dof_first_text_logged = True
-
-    _ClaudeStreamEvent.__init__ = _dof_stream_event_init
-    _ClaudeStreamEvent._dof_first_text_patched = True
-
-
-def _install_main_ai_runtime_patch() -> None:
-    """Убирает повтор AI_RULES из context и пишет безопасные размеры prompt."""
-    log = logging.getLogger("dof.ai.prompt")
-    for _ in range(1200):
-        main_module = sys.modules.get("__main__")
-        ask_ai = getattr(main_module, "ask_ai", None) if main_module else None
-        make_ai_context = (
-            getattr(main_module, "make_ai_context", None) if main_module else None
-        )
-        if ask_ai is not None and make_ai_context is not None:
-            try:
-                from balance_monitor import AI_RULES
-            except ImportError:
-                AI_RULES = ""
-
-            if not getattr(make_ai_context, "_dof_rules_dedup_wrapped", False):
-                original_make_ai_context = make_ai_context
-
-                def _make_ai_context_without_rules(*args, **kwargs):
-                    context = original_make_ai_context(*args, **kwargs)
-                    if AI_RULES and context.startswith(AI_RULES):
-                        context = context[len(AI_RULES):].lstrip()
-                    return context
-
-                _make_ai_context_without_rules._dof_rules_dedup_wrapped = True
-                main_module.make_ai_context = _make_ai_context_without_rules
-
-            if not getattr(ask_ai, "_dof_prompt_diag_wrapped", False):
-                original_ask_ai = ask_ai
-
-                async def _logged_ask_ai(question, context, user_id, _original=original_ask_ai):
-                    system_prompt = getattr(main_module, "SYSTEM_PROMPT", "")
-                    total_prompt = (
-                        f"ВОПРОС ПОЛЬЗОВАТЕЛЯ:\n{question}\n\n"
-                        f"ДАННЫЕ ИЗ ОТЧЁТА:\n{context}"
-                    )
-                    log.warning("AI SYSTEM_PROMPT chars=%s", len(system_prompt))
-                    log.warning("AI context chars=%s", len(context))
-                    log.warning("AI total prompt chars=%s", len(total_prompt))
-                    return await _original(question, context, user_id)
-
-                _logged_ask_ai._dof_prompt_diag_wrapped = True
-                main_module.ask_ai = _logged_ask_ai
-
-            main_module.BUILD_VERSION = "2026.09.16-ai-b1-register-v2"
-            return
-        time.sleep(0.05)
-
-
-threading.Thread(
-    target=_install_main_ai_runtime_patch,
-    name="dof-ai-runtime-patch",
-    daemon=True,
-).start()
 
 
 FIELDS = [
@@ -158,15 +36,19 @@ MONTH_NAMES = {
 
 def _number(value) -> float:
     try:
-        number = float(value or 0.0)
+        if value is None:
+            return None
+        number = float(value)
     except (TypeError, ValueError):
-        return 0.0
-    return number if math.isfinite(number) else 0.0
+        return None
+    return number if math.isfinite(number) else None
 
 
 def bal1(data: Mapping) -> float | None:
     base = _number(data.get("kv4"))
-    if not base:
+    if base is None or not base:
+        return None
+    if any(_number(data.get(key)) is None for key in ('kv102', 'kv34', 'kv24p', 'kv24hv', 'kv28a1')):
         return None
     result = (
         _number(data.get("kv102")) + _number(data.get("kv34"))
@@ -178,7 +60,9 @@ def bal1(data: Mapping) -> float | None:
 
 def bal2(data: Mapping) -> float | None:
     base = _number(data.get("kv3"))
-    if not base:
+    if base is None or not base:
+        return None
+    if any(_number(data.get(key)) is None for key in ('kv101', 'kv33', 'kv28a2')):
         return None
     result = (
         _number(data.get("kv101")) + _number(data.get("kv33"))
@@ -189,7 +73,9 @@ def bal2(data: Mapping) -> float | None:
 
 def balc1(data: Mapping) -> float | None:
     base = _number(data.get("kv4"))
-    if not base:
+    if base is None or not base:
+        return None
+    if any(_number(data.get(key)) is None for key in ('kv102', 'kv24hv', 'kv24p', 'kv32', 'kv28a1', 'kv14')):
         return None
     result = (
         _number(data.get("kv102")) + _number(data.get("kv24hv"))
@@ -201,7 +87,9 @@ def balc1(data: Mapping) -> float | None:
 
 def balc2(data: Mapping) -> float | None:
     base = _number(data.get("kv3"))
-    if not base:
+    if base is None or not base:
+        return None
+    if any(_number(data.get(key)) is None for key in ('kv101', 'kv31', 'kv28a2', 'kv15')):
         return None
     result = (
         _number(data.get("kv101")) + _number(data.get("kv31"))
@@ -215,8 +103,13 @@ def calculate_balances(data: Mapping) -> dict:
 
 
 def sum_period(rows: Iterable[Mapping], fields: Sequence[str] = FIELDS) -> dict:
+    """Суммирует тоннаж; пропуск хотя бы одного показания делает итог поля недоступным."""
     rows = list(rows)
-    return {key: sum(_number(row.get(key)) for row in rows) for key in fields}
+    result = {}
+    for key in fields:
+        values = [_number(row.get(key)) for row in rows]
+        result[key] = None if any(value is None for value in values) else sum(values)
+    return result
 
 
 def row_date(row: Mapping) -> date:
