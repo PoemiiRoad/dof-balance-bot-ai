@@ -19,6 +19,9 @@ from itertools import pairwise
 # значение гарантированно становится рабочим лимитом для Claude.
 os.environ["AI_TIMEOUT_SECONDS"] = "300"
 
+_dof_ai_started_at: float | None = None
+_dof_first_stream_logged = False
+
 try:
     from claude_agent_sdk import ClaudeAgentOptions as _ClaudeAgentOptions
 except ImportError:
@@ -30,11 +33,39 @@ if _ClaudeAgentOptions is not None and not getattr(
     _original_claude_options_init = _ClaudeAgentOptions.__init__
 
     def _dof_streaming_options_init(self, *args, **kwargs):
+        global _dof_ai_started_at, _dof_first_stream_logged
         kwargs.setdefault("include_partial_messages", True)
+        _dof_ai_started_at = time.monotonic()
+        _dof_first_stream_logged = False
         _original_claude_options_init(self, *args, **kwargs)
 
     _ClaudeAgentOptions.__init__ = _dof_streaming_options_init
     _ClaudeAgentOptions._dof_streaming_patched = True
+
+# Логируем только первое streaming-событие каждого AI-запроса. AI_REQUEST_LOCK
+# в main.py не допускает параллельных запросов, поэтому одного таймера достаточно.
+try:
+    from claude_agent_sdk.types import StreamEvent as _ClaudeStreamEvent
+except ImportError:
+    _ClaudeStreamEvent = None
+
+if _ClaudeStreamEvent is not None and not getattr(
+    _ClaudeStreamEvent, "_dof_first_event_patched", False
+):
+    _original_stream_event_init = _ClaudeStreamEvent.__init__
+
+    def _dof_stream_event_init(self, *args, **kwargs):
+        global _dof_first_stream_logged
+        _original_stream_event_init(self, *args, **kwargs)
+        if not _dof_first_stream_logged and _dof_ai_started_at is not None:
+            elapsed = time.monotonic() - _dof_ai_started_at
+            logging.getLogger("dof.ai.stream").warning(
+                "Claude first StreamEvent after %.1f s", elapsed
+            )
+            _dof_first_stream_logged = True
+
+    _ClaudeStreamEvent.__init__ = _dof_stream_event_init
+    _ClaudeStreamEvent._dof_first_event_patched = True
 
 
 # Дополнительные постоянные правила для AI. main.py импортирует balance_logic
