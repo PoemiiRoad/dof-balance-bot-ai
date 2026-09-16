@@ -49,6 +49,7 @@ class HelpersAndAlertsTests(unittest.TestCase):
         self.assertIsNone(main.calc_produced(data))
         self.assertEqual(main.fmt(math.nan), "—")
         self.assertEqual(main.sign(math.inf), "—")
+        self.assertEqual(main.pct_text(None, 100), "—")
 
     def test_ai_context_contains_absolute_daily_and_three_day_data(self):
         rows = []
