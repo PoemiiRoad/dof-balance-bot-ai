@@ -4,19 +4,20 @@
 обычными модульными тестами.
 """
 
+import logging
 import math
 import os
 import re
+import sys
+import threading
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from itertools import pairwise
 
-# AI runtime defaults are applied here because balance_logic is imported by main.py
-# before main.py reads AI_TIMEOUT_SECONDS and before ClaudeAgentOptions is created.
-# Force the requested 180-second ceiling even if an older Railway variable still
-# contains 90, and enable Agent SDK partial-message streaming without changing
-# the current Telegram response flow.
-os.environ["AI_TIMEOUT_SECONDS"] = "180"
+# main.py импортирует balance_logic до чтения AI_TIMEOUT_SECONDS, поэтому это
+# значение гарантированно становится рабочим лимитом для Claude.
+os.environ["AI_TIMEOUT_SECONDS"] = "300"
 
 try:
     from claude_agent_sdk import ClaudeAgentOptions as _ClaudeAgentOptions
@@ -82,6 +83,40 @@ except ImportError:
 
 if _balance_monitor is not None and _AI_COMMON_MODE_RULES not in _balance_monitor.AI_RULES:
     _balance_monitor.AI_RULES += _AI_COMMON_MODE_RULES
+
+
+def _install_main_ai_diagnostics() -> None:
+    """После загрузки main.py оборачивает ask_ai и пишет только размеры prompt."""
+    log = logging.getLogger("dof.ai.prompt")
+    for _ in range(1200):
+        main_module = sys.modules.get("__main__")
+        ask_ai = getattr(main_module, "ask_ai", None) if main_module else None
+        if ask_ai is not None:
+            if getattr(ask_ai, "_dof_prompt_diag_wrapped", False):
+                return
+
+            async def _logged_ask_ai(question, context, user_id, _original=ask_ai):
+                system_prompt = getattr(main_module, "SYSTEM_PROMPT", "")
+                total_prompt = (
+                    f"ВОПРОС ПОЛЬЗОВАТЕЛЯ:\n{question}\n\n"
+                    f"ДАННЫЕ ИЗ ОТЧЁТА:\n{context}"
+                )
+                log.warning("AI SYSTEM_PROMPT chars=%s", len(system_prompt))
+                log.warning("AI context chars=%s", len(context))
+                log.warning("AI total prompt chars=%s", len(total_prompt))
+                return await _original(question, context, user_id)
+
+            _logged_ask_ai._dof_prompt_diag_wrapped = True
+            main_module.ask_ai = _logged_ask_ai
+            return
+        time.sleep(0.05)
+
+
+threading.Thread(
+    target=_install_main_ai_diagnostics,
+    name="dof-ai-diagnostics",
+    daemon=True,
+).start()
 
 
 FIELDS = [
