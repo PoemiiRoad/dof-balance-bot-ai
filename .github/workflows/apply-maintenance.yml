@@ -2,6 +2,9 @@ name: Apply maintenance
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - maintenance_patch.py
 
 permissions:
   contents: write
