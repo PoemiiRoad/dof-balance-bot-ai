@@ -338,6 +338,27 @@ class AIClientTests(unittest.IsolatedAsyncioTestCase):
             answer = await main.ask_ai("вопрос", "контекст", 101)
         self.assertIn("Лимит использования Claude Pro", answer)
 
+    async def test_service_stream_delta_without_text_does_not_crash(self):
+        class FakeStreamEvent:
+            def __init__(self, event):
+                self.event = event
+
+        async def fake_query(*, prompt, options):
+            yield FakeStreamEvent({
+                "type": "content_block_delta",
+                "delta": {"type": "thinking_delta", "thinking": "internal"},
+            })
+
+        with (
+            patch.object(main, "StreamEvent", FakeStreamEvent),
+            patch.object(main, "query", fake_query),
+        ):
+            answer, error_type, status = await main._run_claude_agent("тест")
+
+        self.assertEqual(answer, "")
+        self.assertIsNone(error_type)
+        self.assertIsNone(status)
+
 
 if __name__ == "__main__":
     unittest.main()

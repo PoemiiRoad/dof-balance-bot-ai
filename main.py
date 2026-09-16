@@ -1633,11 +1633,11 @@ async def _run_claude_agent(prompt: str) -> tuple[str, str | None, int | None]:
                     delta = event.get("delta", {})
                     if delta.get("type") == "text_delta":
                         chunk = delta.get("text", "")
-                    if chunk:
-                        if first_text_s is None:
-                            first_text_s = loop.time() - started
-                            logger.warning("Claude first text_delta after %.1f s", first_text_s)
-                        stream_parts.append(chunk)
+                        if chunk:
+                            if first_text_s is None:
+                                first_text_s = loop.time() - started
+                                logger.warning("Claude first text_delta after %.1f s", first_text_s)
+                            stream_parts.append(chunk)
             elif isinstance(message, AssistantMessage):
                 if message.error:
                     assistant_error = str(message.error)
@@ -1689,7 +1689,7 @@ def _friendly_claude_error(error_type: str | None, status: int | None) -> str:
     if error_type == "authentication_failed" or status in {401, 403}:
         return (
             "⚠️ Авторизация Claude Pro не прошла. Создайте новый токен командой "
-            "`claude setup-token` и обновите CLAUDE_CODE_OAUTH_TOKEN в Northflank."
+            "`claude setup-token` и обновите CLAUDE_CODE_OAUTH_TOKEN в переменных окружения сервиса."
         )
     if error_type == "billing_error" or status == 402:
         return (
@@ -1727,7 +1727,7 @@ async def ask_ai(question: str, context: str, user_id: int | None) -> str:
         variables = ", ".join(CLAUDE_AUTH_CONFLICTS)
         return (
             "⚠️ Найдены старые настройки авторизации: "
-            f"{variables}. Удалите их из Northflank — иначе подписочный токен "
+            f"{variables}. Удалите их из переменных окружения сервиса — иначе подписочный токен "
             "не будет использован."
         )
 
